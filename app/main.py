@@ -2,6 +2,19 @@ import logging
 import os
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
+import psycopg2
+
+DB_HOST = os.environ['POSTGRES_HOST']
+DB_DB = os.environ['POSTGRES_DB']
+DB_USER = os.environ['POSTGRES_USER']
+DB_PW = os.environ['POSTGRES_PASSWORD']
+
+conn = psycopg2.connect(
+    host=DB_HOST,
+    database=DB_DB,
+    user=DB_USER,
+    password=DB_PW
+)
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -13,7 +26,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 if __name__ == '__main__':
     TOKEN = os.environ['TG_TOKEN']
-    print("Token on " + TOKEN)
     application = ApplicationBuilder().token(TOKEN).build()
     
     start_handler = CommandHandler('start', start)
