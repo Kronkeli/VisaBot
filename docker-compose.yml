@@ -1,15 +1,6 @@
 version: "3.8"
 
 services:
-  app:
-    image: visabot:latest
-    environment:
-      - TG_TOKEN
-      - POSTGRES_PASSWORD
-      - POSTGRES_USER
-      - POSTGRES_DB
-      - POSTGRES_HOST=localhost
-    build: ./app/
 
   db:
     image: visabot_db:latest
@@ -18,3 +9,17 @@ services:
       - POSTGRES_USER
       - POSTGRES_DB
     build: ./db/
+    ports:
+      - "5432:5432"
+
+  app:
+    image: visabot:latest
+    environment:
+      - TG_TOKEN
+      - POSTGRES_PASSWORD
+      - POSTGRES_USER
+      - POSTGRES_DB
+      - POSTGRES_HOST
+    build: ./app/
+    depends_on:
+      - db
