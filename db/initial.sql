@@ -10,11 +10,11 @@ CREATE TABLE IF NOT EXISTS admins (
 
 
 INSERT INTO quizzes (question, answer) VALUES 
-    ('Mikä sun nimi on??', 'Samu'),
-    ('Mikä päivä tänään on??', 'PERJANTAI!'),
-    ('Toimiiko tää botti??', 'Ei paperilla...')
+    ('Mikä päivä tänään on?', 'Maanantai'),
+    ('Mikä tulee aakkosissa l:n jälkeen?', 'm'),
+    ('Toimiiko tää botti??', 'Ei')
 ON CONFLICT DO NOTHING;
 
 INSERT INTO admins VALUES 
-    ('kronkeli')
+    ('Kronkeli')
 ON CONFLICT DO NOTHING;

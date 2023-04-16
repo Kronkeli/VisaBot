@@ -1,8 +1,9 @@
 import logging
 import os
 import random
+import re
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import Update, Chat, ChatPermissions, Bot
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, ConversationHandler, filters
 import psycopg2
 
@@ -26,9 +27,10 @@ ACTIVE_QUESTION = ""
 ACTIVE_ANSWER = ""
 IS_BOT_ACTIVE = False
 ACTIVE_CHAT_ID = ""
+ADMINS = []
 
 # For adding questions
-QUESTIONS = 1
+QUESTIONS_STATE = 1
 
 # Cursor for database operations
 CURSOR = conn.cursor()
@@ -58,6 +60,17 @@ def update_question_from_db():
     except:
         logging.warning("Aktiivista kyssäriä ei voitu asettaa. Syynä luultavasti tyhjä taulu.")
 
+def get_admins_from_db():
+    global ADMINS
+    CURSOR.execute("""SELECT username FROM admins""")
+    results = CURSOR.fetchall()
+    admins_list = []
+    for row in results:
+        admins_list.append(row[0])
+    ADMINS = admins_list
+    logging.info("Adminit päivitetty.")
+    print(f"adminit: {ADMINS}")
+
 def get_all_questions_from_db():
     CURSOR.execute("""SELECT * FROM quizzes""")
     results = CURSOR.fetchall()
@@ -76,10 +89,9 @@ def add_question_to_db(question, answer):
     CURSOR.execute("""
         INSERT INTO quizzes (question, answer) VALUES (%s, %s);
     """,
-    (question, answer))
+    (question.strip(), answer.strip()))
     conn.commit()
     return True
-
 
 def reset_id():
     global ACTIVE_ID
@@ -107,9 +119,13 @@ def dec_id():
     else:
         return False
 
-def set_bot_status(state):
-    global IS_BOT_ACTIVE
-    IS_BOT_ACTIVE = state
+async def set_bot_status(state):
+    if state:
+        # await Bot.set_chat_permissions(chat_id=ACTIVE_CHAT_ID, permissions=ChatPermissions(can_send_messages=True))
+        logging.info("Kaikennäköinen viestintä on sallittu.")
+    else:    
+        # await Bot.set_chat_permissions(chat_id=ACTIVE_CHAT_ID, permissions=ChatPermissions(can_send_messages=False))
+        logging.info("Kaikennäköinen viestintä on kielletty.")
 
 def check_admin(username):
     CURSOR.execute("""SELECT * FROM admins""")
@@ -134,12 +150,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=update.effective_chat.id, text="I'm a bot, MORO talk to me!")
 
 async def activate_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    set_bot_status(True)
-    await context.bot.send_message(chat_id=ACTIVE_CHAT_ID, text="Botti alkaa tekemään bottiasioita.")
+    # Activate chat message permissions and print the ACTIVE question
+    global ACTIVE_QUESTION
+    await set_bot_status(True)
+    await context.bot.send_message(chat_id=ACTIVE_CHAT_ID, text="Aloitetaan kysymys:")
+    await context.bot.send_message(chat_id=ACTIVE_CHAT_ID, text=f"Kysymys on: \n{ACTIVE_QUESTION}")
 
 async def deactivate_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    set_bot_status(False)
-    await context.bot.send_message(chat_id=ACTIVE_CHAT_ID, text="Botti ei nyt tee asioita.")
+    # Deactivate chat message permissions
+    await set_bot_status(False)
+    await context.bot.send_message(chat_id=ACTIVE_CHAT_ID, text="Odotetaan uutta kysymystä...")
 
 async def set_active_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global ACTIVE_CHAT_ID
@@ -165,7 +185,7 @@ async def reset_questions(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def start_adding_questions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await context.bot.send_message(chat_id=update.effective_chat.id, 
                                    text=f"Nyt tehtaillaan kyssäreitä. Anna kyssärit (1/viesti) muodossa \nKysymys 1? --- Vastaus 1 \nLopeta keräys komennolla /stop.")
-    return QUESTIONS
+    return QUESTIONS_STATE
 
 async def add_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Store question sent by user."""
@@ -180,7 +200,7 @@ async def add_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     except:
         await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Tapahtui jokin virhe kyssärin tallennuksessa.")
 
-    return QUESTIONS    
+    return QUESTIONS_STATE    
 
 async def stop_adding_questions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Nyt on tehtailtu kyssäreitä.")
@@ -229,6 +249,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if (check_answer(guess)):
         await update.message.reply_text(f"OIKEIN!!! ({correctness}% todennäköisyydellä)")
         await context.bot.send_message(chat_id=ACTIVE_CHAT_ID, text=f"Oikea vastaushan oli: {ACTIVE_ANSWER}. Todennäköisyys: 100%." )
+        
+        # After (a likely) correct answer set the chat message permissions to false.
+        await set_bot_status(False)
     else:
         await update.message.reply_text("Nyt meni väärin..")
 
@@ -236,7 +259,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 if __name__ == '__main__':
     TOKEN = os.environ['TG_TOKEN']
     application = ApplicationBuilder().token(TOKEN).build()
+
+    # Get the admin names
+    get_admins_from_db()
     
+    ### ADMIN COMMANDOS ###
     activate_bot_handler = CommandHandler('activate', activate_bot)
     deactivate_bot_handler = CommandHandler('deactivate', deactivate_bot)
     set_active_chat_handler = CommandHandler('set_active_chat', set_active_chat)
@@ -253,17 +280,14 @@ if __name__ == '__main__':
     questions_handler = ConversationHandler(
         entry_points=[CommandHandler('add_questions', start_adding_questions)],
         states={
-            QUESTIONS: [
+            QUESTIONS_STATE: [
                 MessageHandler(filters.TEXT & ~(filters.COMMAND | filters.Regex("stop")), add_question),
             ],
         },
         fallbacks=[CommandHandler('stop', stop_adding_questions)]
     )
 
-
     application.add_handler(start_handler)
-
-    ### ADMIN COMMANDOS ###
     application.add_handler(activate_bot_handler)
     application.add_handler(deactivate_bot_handler)
     application.add_handler(set_active_chat_handler)
