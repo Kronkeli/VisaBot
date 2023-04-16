@@ -3,7 +3,7 @@ import os
 import random
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, ConversationHandler, filters
 import psycopg2
 
 load_dotenv()
@@ -21,9 +21,14 @@ conn = psycopg2.connect(
 )
 
 # Some global variables
-ACTIVE_ID = 0
-ACTIVE_QUESTION = "Mikä on neljä numeroissa?"
-ACTIVE_ANSWER = "4"
+ACTIVE_ID = 1
+ACTIVE_QUESTION = ""
+ACTIVE_ANSWER = ""
+IS_BOT_ACTIVE = False
+ACTIVE_CHAT_ID = ""
+
+# For adding questions
+QUESTIONS = 1
 
 # Cursor for database operations
 CURSOR = conn.cursor()
@@ -35,69 +40,195 @@ logging.basicConfig(
 )
 
 def check_answer(guess):
-    return guess == ACTIVE_ANSWER
+    return guess.lower() == ACTIVE_ANSWER.lower()
 
-def query_question():
+def update_question_from_db():
     global ACTIVE_ID
     global ACTIVE_QUESTION
     global ACTIVE_ANSWER
-    global CURSOR
+    CURSOR
     
-    CURSOR.execute("""SELECT * FROM quizzes WHERE id = %s""", (ACTIVE_ID,))
-    result_row = CURSOR.fetchone()
-    print(str(result_row))
+    try:
+        CURSOR.execute("""SELECT * FROM quizzes WHERE id = %s""", (ACTIVE_ID,))
+        result_row = CURSOR.fetchone()
+        print(str(result_row))
 
-    ACTIVE_QUESTION = result_row(1)
-    ACTIVE_ANSWER = result_row(2)
+        ACTIVE_QUESTION = result_row[1]
+        ACTIVE_ANSWER = result_row[2]
+    except:
+        logging.warning("Aktiivista kyssäriä ei voitu asettaa. Syynä luultavasti tyhjä taulu.")
+
+def get_all_questions_from_db():
+    CURSOR.execute("""SELECT * FROM quizzes""")
+    results = CURSOR.fetchall()
+    result_formatted = f""
+    for row in results:
+        result_formatted += f"{str(row)} \n"
+    
+    return result_formatted
+
+def reset_all_questions_from_db():
+    CURSOR.execute("""TRUNCATE TABLE quizzes""")
+    CURSOR.execute("""ALTER SEQUENCE quizzes_id_seq RESTART""")
+    conn.commit()
+
+def add_question_to_db(question, answer):
+    CURSOR.execute("""
+        INSERT INTO quizzes (question, answer) VALUES (%s, %s);
+    """,
+    (question, answer))
+    conn.commit()
+    return True
+
 
 def reset_id():
     global ACTIVE_ID
-    ACTIVE_ID = 0
+    ACTIVE_ID = 1
 
 def add_id():
     global ACTIVE_ID
-    ACTIVE_ID += 1
+    # Ettei mene yli
+    CURSOR.execute("""SELECT MAX(id) FROM quizzes""")
+    result_row = CURSOR.fetchone()
+    max_id = result_row[0]
+    
+    if ACTIVE_ID < max_id:
+        ACTIVE_ID += 1
+        return True
+    else:
+        return False
 
 def dec_id():
     global ACTIVE_ID
-    ACTIVE_ID -= 1
+    # Ettei mene ali
+    if (ACTIVE_ID > 1):
+        ACTIVE_ID -= 1
+        return True
+    else:
+        return False
+
+def set_bot_status(state):
+    global IS_BOT_ACTIVE
+    IS_BOT_ACTIVE = state
+
+def check_admin(username):
+    CURSOR.execute("""SELECT * FROM admins""")
+    results = CURSOR.fetchall()
+    for row in results:
+        if row[0] == username:
+            return True
+    return False
+
+def store_question(question_string):
+    logging.info("Starting to parse question text...")
+    splitted = question_string.split('---')
+    if len(splitted) == 2:
+        logging.info("Splitattu, ja koitetaan tallettaa muodossa kysymys: '{splitted[0]}', ja vastaus: '{splitted[1]}'")
+        if add_question_to_db(splitted[0], splitted[1]):
+            return True
+    else:
+        return False
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=update.effective_chat.id, text="I'm a bot, MORO talk to me!")
 
+async def activate_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    set_bot_status(True)
+    await context.bot.send_message(chat_id=ACTIVE_CHAT_ID, text="Botti alkaa tekemään bottiasioita.")
+
+async def deactivate_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    set_bot_status(False)
+    await context.bot.send_message(chat_id=ACTIVE_CHAT_ID, text="Botti ei nyt tee asioita.")
+
+async def set_active_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global ACTIVE_CHAT_ID
+    ACTIVE_CHAT_ID = update.effective_chat.id
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Tämä chätti on nyt pyhitetty botille.")
+
 async def send_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Lähettää aktiivisen kysymyksen."""
-    await update.message.reply_text(f"Kysymys on: {ACTIVE_QUESTION}")
+    update_question_from_db()
+    if ACTIVE_CHAT_ID != "":
+        await context.bot.send_message(chat_id=ACTIVE_CHAT_ID, text=f"Kysymys on: \n{ACTIVE_QUESTION}")
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Aktiivista chattia ei ole asetettu.")
+
+async def send_all_questions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    questions = get_all_questions_from_db()
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Aktiiviset kyssärit ja vastaukset: \n{questions}")
+
+async def reset_questions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    reset_all_questions_from_db()
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Kaikki kysymykset resetattu.")
+
+async def start_adding_questions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await context.bot.send_message(chat_id=update.effective_chat.id, 
+                                   text=f"Nyt tehtaillaan kyssäreitä. Anna kyssärit (1/viesti) muodossa \nKysymys 1? --- Vastaus 1 \nLopeta keräys komennolla /stop.")
+    return QUESTIONS
+
+async def add_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Store question sent by user."""
+    try:
+        if store_question(update.message.text):
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Kyssäri (ehkä) jopa tallennettu. Katsotaas.")
+            questions = get_all_questions_from_db()
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Aktiiviset kyssärit ja vastaukset: \n{questions}")
+        else:
+            print("Kyssäriä ei tallennettu. Lokin päällä lokki.")
+
+    except:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Tapahtui jokin virhe kyssärin tallennuksessa.")
+
+    return QUESTIONS    
+
+async def stop_adding_questions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Nyt on tehtailtu kyssäreitä.")
+    return ConversationHandler.END
 
 async def send_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Lähettää aktiivisen vastauksen."""
-    await update.message.reply_text(f"Aktiivinen vastaus on: {ACTIVE_ANSWER}")
+    if ACTIVE_CHAT_ID != "":
+        await context.bot.send_message(chat_id=ACTIVE_CHAT_ID, text=f"Aktiivinen vastaus on: \n{ACTIVE_ANSWER}")
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Aktiivista chattia ei ole asetettu.")
+
+async def send_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Lähettää aktiivisen id:n"""
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Aktiivinen id on  nyt: {ACTIVE_ID}")
 
 async def nullify_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Nollaa aktiivisen idn."""
     reset_id()
     global ACTIVE_ID
-    await update.message.reply_text(f"ID:tä nollattu ja se on nyt: {ACTIVE_ID}")
+    update_question_from_db()
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"ID:tä nollattu ja se on nyt: {ACTIVE_ID}")
 
 async def increase_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Lisää aktiivista id:tä."""
-    add_id()
     global ACTIVE_ID
-    await update.message.reply_text(f"ID:tä lisätty ja se on nyt: {ACTIVE_ID}")
+    if add_id():
+        update_question_from_db()
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"ID:tä lisätty ja se on nyt: {ACTIVE_ID}")
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"ID:tä EI lisätty ja se on vielä: {ACTIVE_ID}")
 
 async def decrease_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Vähentää aktiviista id:tä."""
-    dec_id()
     global ACTIVE_ID
-    await update.message.reply_text(f"ID:tä vähennetty ja se on nyt: {ACTIVE_ID}")
+    if dec_id():
+        update_question_from_db()
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"ID:tä vähennetty ja se on nyt: {ACTIVE_ID}")
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"ID:tä EI vähennetty ja se on vielä: {ACTIVE_ID}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Checks if the answer is the same as the active answer"""
     guess = update.message.text
-    correctness = random.randint(0,100)
+    correctness = random.randint(50,100)
     if (check_answer(guess)):
         await update.message.reply_text(f"OIKEIN!!! ({correctness}% todennäköisyydellä)")
-        await update.message.reply_text(f"Oikea vastaushan oli: {ACTIVE_ANSWER}. Todennäköisyys: 100%." )
+        await context.bot.send_message(chat_id=ACTIVE_CHAT_ID, text=f"Oikea vastaushan oli: {ACTIVE_ANSWER}. Todennäköisyys: 100%." )
     else:
         await update.message.reply_text("Nyt meni väärin..")
 
@@ -106,20 +237,48 @@ if __name__ == '__main__':
     TOKEN = os.environ['TG_TOKEN']
     application = ApplicationBuilder().token(TOKEN).build()
     
+    activate_bot_handler = CommandHandler('activate', activate_bot)
+    deactivate_bot_handler = CommandHandler('deactivate', deactivate_bot)
+    set_active_chat_handler = CommandHandler('set_active_chat', set_active_chat)
     start_handler = CommandHandler('start', start)
     send_question_handler = CommandHandler('send_question', send_question)
+    send_all_questions_handler = CommandHandler('send_questions', send_all_questions)
+    reset_all_questions_handler = CommandHandler('reset_questions', reset_questions)
     send_answer_handler = CommandHandler('send_answer', send_answer)
-    reset_id_handler = CommandHandler('send_answer', nullify_id)
-    add_id_handler = CommandHandler('send_answer', increase_id)
-    dec_id_handler = CommandHandler('send_answer', decrease_id)
+    send_id_handler = CommandHandler('send_id', send_id)
+    reset_id_handler = CommandHandler('reset_id', nullify_id)
+    add_id_handler = CommandHandler('increase_id', increase_id)
+    dec_id_handler = CommandHandler('decrease_id', decrease_id)
+    # For adding questions
+    questions_handler = ConversationHandler(
+        entry_points=[CommandHandler('add_questions', start_adding_questions)],
+        states={
+            QUESTIONS: [
+                MessageHandler(filters.TEXT & ~(filters.COMMAND | filters.Regex("stop")), add_question),
+            ],
+        },
+        fallbacks=[CommandHandler('stop', stop_adding_questions)]
+    )
+
 
     application.add_handler(start_handler)
+
+    ### ADMIN COMMANDOS ###
+    application.add_handler(activate_bot_handler)
+    application.add_handler(deactivate_bot_handler)
+    application.add_handler(set_active_chat_handler)
     application.add_handler(send_question_handler)
+    application.add_handler(send_all_questions_handler)
+    application.add_handler(reset_all_questions_handler)
     application.add_handler(send_answer_handler)
+    application.add_handler(send_id_handler)
     application.add_handler(reset_id_handler)
     application.add_handler(add_id_handler)
     application.add_handler(dec_id_handler)
+    application.add_handler(questions_handler)
 
     application.add_handler(MessageHandler(None, handle_message))
+
+    update_question_from_db()
 
     application.run_polling()

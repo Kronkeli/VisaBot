@@ -9,6 +9,8 @@ services:
       - POSTGRES_USER
       - POSTGRES_DB
     build: ./db/
+    volumes:
+      - ./db/initial.sql:/docker-entrypoint-initdb.d/initial.sql
     ports:
       - "5432:5432"
 
@@ -23,3 +25,6 @@ services:
     build: ./app/
     depends_on:
       - db
+
+volumes:
+  visavolume:
